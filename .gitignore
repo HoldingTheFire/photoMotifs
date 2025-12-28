@@ -1,0 +1,32 @@
+# Cache files
+embeddings_cache.pkl
+smart_preview_mapping.pkl
+tag_database.json
+*.pyc
+__pycache__/
+
+# Results and working directories
+results/
+working/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test/debug scripts
+test_*.py
+debug_*.py
+check_*.py
+show_*.py
+explore_*.py
+analyze_*.py
+find_*.py
+search_*.py
+match_*.py
+
+# Env
+.env
