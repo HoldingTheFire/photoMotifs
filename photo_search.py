@@ -43,6 +43,51 @@ RAW_EXTENSIONS = {'.raf', '.dng'}
 THUMBNAIL_SIZE = 300
 DEFAULT_TOP_N = 25
 
+# Analog folder detection
+ANALOG_FOLDER_NAME = "Analog"
+
+
+def is_analog_negative(path: Path) -> bool:
+    """Check if the image is from the Analog folder (scanned film negatives)."""
+    return ANALOG_FOLDER_NAME in path.parts
+
+
+def invert_color_negative(image: Image.Image) -> Image.Image:
+    """
+    Invert a color negative film scan to positive.
+
+    Applies:
+    1. RGB inversion (255 - pixel value)
+    2. Per-channel auto-levels to remove orange mask
+    3. Slight saturation boost
+
+    This is a simplified conversion suitable for CLIP embeddings.
+    Not as accurate as Negative Lab Pro but produces viewable results.
+    """
+    arr = np.array(image, dtype=np.float32)
+
+    # Step 1: Invert
+    arr = 255.0 - arr
+
+    # Step 2: Per-channel auto-levels to remove orange mask
+    # Find the 1st and 99th percentile for each channel and stretch
+    for c in range(3):
+        channel = arr[:, :, c]
+        p_low = np.percentile(channel, 1)
+        p_high = np.percentile(channel, 99)
+        if p_high > p_low:
+            channel = (channel - p_low) * 255.0 / (p_high - p_low)
+            arr[:, :, c] = np.clip(channel, 0, 255)
+
+    # Step 3: Slight saturation boost (negatives often look flat after inversion)
+    # Convert to HSV-like approach: boost deviation from gray
+    gray = arr.mean(axis=2, keepdims=True)
+    saturation_boost = 1.2
+    arr = gray + (arr - gray) * saturation_boost
+    arr = np.clip(arr, 0, 255)
+
+    return Image.fromarray(arr.astype(np.uint8))
+
 
 @dataclass
 class ImageResult:
@@ -70,22 +115,61 @@ def get_sp_mapping() -> Dict[Path, Path]:
     return _sp_mapping
 
 
-def load_smart_preview(sp_path: Path) -> Optional[Image.Image]:
-    """Load smart preview DNG and convert to PIL Image using rawpy."""
+def load_smart_preview(sp_path: Path, original_path: Optional[Path] = None) -> Optional[Image.Image]:
+    """
+    Load smart preview DNG and convert to PIL Image.
+
+    Smart Preview DNGs don't work with rawpy, so we extract the embedded JPEG
+    or use PIL directly. For Analog folder images, applies negative inversion.
+
+    Args:
+        sp_path: Path to the smart preview DNG
+        original_path: Path to the original file (used to detect Analog folder)
+    """
+    img = None
+
+    # Method 1: Try extracting embedded JPEG (most reliable for Smart Previews)
     try:
-        with rawpy.imread(str(sp_path)) as raw:
-            rgb = raw.postprocess(
-                use_camera_wb=True,
-                no_auto_bright=False,
-                output_bps=8
-            )
-            return Image.fromarray(rgb)
-    except Exception as e:
-        # Try PIL directly (some DNGs work)
+        with open(sp_path, 'rb') as f:
+            data = f.read()
+
+        jpeg_start = data.find(b'\xff\xd8\xff')
+        if jpeg_start != -1:
+            jpeg_end = data.find(b'\xff\xd9', jpeg_start + 1000)
+            if jpeg_end != -1:
+                jpeg_data = data[jpeg_start:jpeg_end + 2]
+                from io import BytesIO
+                img = Image.open(BytesIO(jpeg_data))
+                img.load()
+                img = img.convert('RGB')
+    except Exception:
+        pass
+
+    # Method 2: Try PIL directly
+    if img is None:
         try:
-            return Image.open(sp_path).convert('RGB')
-        except:
+            img = Image.open(sp_path).convert('RGB')
+        except Exception:
+            pass
+
+    # Method 3: Fall back to rawpy (rarely works for Smart Previews)
+    if img is None:
+        try:
+            with rawpy.imread(str(sp_path)) as raw:
+                rgb = raw.postprocess(
+                    use_camera_wb=True,
+                    no_auto_bright=False,
+                    output_bps=8
+                )
+                img = Image.fromarray(rgb)
+        except Exception:
             return None
+
+    # Apply negative inversion for Analog folder images
+    if img is not None and original_path is not None and is_analog_negative(original_path):
+        img = invert_color_negative(img)
+
+    return img
 
 
 def get_sp_stats() -> Dict[str, int]:
@@ -239,7 +323,7 @@ def load_image(path: Path, skip_raw_conversion: bool = True, use_smart_preview: 
             sp_mapping = get_sp_mapping()
             if path in sp_mapping:
                 sp_path = sp_mapping[path]
-                img = load_smart_preview(sp_path)
+                img = load_smart_preview(sp_path, original_path=path)
                 if img:
                     _sp_stats["sp_used"] += 1
                     return img.convert('RGB'), 'smart_preview'
@@ -253,6 +337,9 @@ def load_image(path: Path, skip_raw_conversion: bool = True, use_smart_preview: 
                 img = Image.open(path)
                 img.load()  # Force load to catch errors early
                 img = img.convert('RGB')
+                # Apply inversion for Analog folder negatives
+                if is_analog_negative(path):
+                    img = invert_color_negative(img)
                 return img, 'jpg'
             except Exception as e:
                 return None, 'error'
@@ -266,6 +353,9 @@ def load_image(path: Path, skip_raw_conversion: bool = True, use_smart_preview: 
                         img = Image.open(jpg_path)
                         img.load()
                         img = img.convert('RGB')
+                        # Apply inversion for Analog folder negatives
+                        if is_analog_negative(path):
+                            img = invert_color_negative(img)
                         return img, 'jpg'
                     except:
                         pass
@@ -275,14 +365,22 @@ def load_image(path: Path, skip_raw_conversion: bool = True, use_smart_preview: 
                 try:
                     img = extract_embedded_jpeg_from_raf(path)
                     if img:
-                        return img.convert('RGB'), 'raw_embedded'
+                        img = img.convert('RGB')
+                        # Apply inversion for Analog folder negatives
+                        if is_analog_negative(path):
+                            img = invert_color_negative(img)
+                        return img, 'raw_embedded'
                 except:
                     pass
             elif ext == '.dng':
                 try:
                     img = extract_embedded_jpeg_from_dng(path)
                     if img:
-                        return img.convert('RGB'), 'raw_embedded'
+                        img = img.convert('RGB')
+                        # Apply inversion for Analog folder negatives
+                        if is_analog_negative(path):
+                            img = invert_color_negative(img)
+                        return img, 'raw_embedded'
                 except:
                     pass
 
