@@ -121,24 +121,43 @@ def detect_film_type(path: Path) -> str:
     - 'slide': Slide/positive film (Velvia, Ektachrome, etc.) - no inversion
     - 'bw_negative': Black & white negative - simple inversion
     - 'color_negative': Color negative - color inversion with orange mask removal
-    - 'already_processed': Already inverted (Negative Lab Pro, Underdog, etc.) - no inversion
+    - 'already_processed': Already inverted (external tools like Nikon Scan) - no inversion
     - 'not_analog': Not from Analog folder - no processing
+
+    Key insight: Lightroom edits (including Negative Lab Pro) are NOT baked into
+    RAW/DNG files or Smart Previews. So even if LR has the "Negative Lab" profile,
+    we still need to invert the raw data when loading it for CLIP embedding.
+
+    Only truly pre-processed files (TIF from Nikon Scan, Underdog output) skip inversion.
     """
     if ANALOG_FOLDER_NAME not in path.parts:
         return 'not_analog'
 
     path_lower = str(path).lower()
+    ext_lower = path.suffix.lower()
 
-    # Check Lightroom profile first - most reliable indicator
-    lr_profile = get_lightroom_profile(path)
-    if lr_profile:
-        if "negative lab" in lr_profile.lower():
-            return 'already_processed'
-
-    # Check folder patterns for already processed images
+    # Check for externally pre-processed files (TIF/JPG from conversion software)
+    # These are output files that are already positive images
     for pattern in ALREADY_PROCESSED_PATTERNS:
         if pattern in path_lower:
-            return 'already_processed'
+            # Only TIF/JPG from these folders are pre-processed
+            # DNG files are still raw negatives
+            if ext_lower in ('.tif', '.tiff', '.jpg', '.jpeg'):
+                return 'already_processed'
+
+    # For RAW files (DNG, RAF), check Lightroom profile for film type hints
+    lr_profile = get_lightroom_profile(path)
+    if lr_profile:
+        lr_profile_lower = lr_profile.lower()
+        # "Negative Lab" means it's a color negative (LR has it converted, but raw is still negative)
+        if "negative lab" in lr_profile_lower:
+            return 'color_negative'
+        # "Embedded" profile typically means slide film scanned with no conversion
+        if lr_profile_lower == "embedded":
+            # Check if it's actually slide film via folder name
+            for pattern in SLIDE_FILM_PATTERNS:
+                if pattern in path_lower:
+                    return 'slide'
 
     # Check for slide film (no inversion needed)
     for pattern in SLIDE_FILM_PATTERNS:
@@ -150,7 +169,7 @@ def detect_film_type(path: Path) -> str:
         if pattern in path_lower:
             return 'bw_negative'
 
-    # Default: assume color negative (needs full color inversion)
+    # Default for Analog folder: assume color negative (needs full color inversion)
     return 'color_negative'
 
 
