@@ -8,21 +8,22 @@ import os
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 import sys
 import pickle
-import hashlib
 import shutil
-import struct
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, List, Tuple, Dict
 from dataclasses import dataclass
 import argparse
+import hashlib
 
 import numpy as np
 from PIL import Image
 import torch
 from transformers import CLIPProcessor, CLIPModel
 from tqdm import tqdm
-import rawpy
+
+# Import Lightroom preview loader
+from src.lightroom_preview_loader import load_lightroom_preview
 
 # Configuration
 PHOTO_SOURCE = Path(r"Z:\Zefram Photography")
@@ -30,233 +31,13 @@ WORKING_DIR = Path(r"C:\projects\photoMotifs\working")
 RESULTS_DIR = Path(r"C:\projects\photoMotifs\results")
 CACHE_FILE = Path(r"C:\projects\photoMotifs\cache\embeddings_cache.pkl")
 
-# Smart Preview configuration
-SP_DIR = Path(r"C:\Users\zefra\OneDrive\Pictures\Lightroom\Lightroom Catalog-v13-4 Smart Previews.lrdata")
-SP_MAPPING_CACHE = Path(r"C:\projects\photoMotifs\cache\smart_preview_mapping.pkl")
-
-# Global smart preview mapping (lazy-loaded)
-_sp_mapping: Optional[Dict[Path, Path]] = None
-_sp_stats = {"sp_used": 0, "original_used": 0}
+# Image loading statistics
+_load_stats = {"lr_preview": 0, "original": 0, "failed": 0}
 
 SUPPORTED_EXTENSIONS = {'.jpg', '.jpeg', '.raf', '.dng', '.tiff', '.tif'}
 RAW_EXTENSIONS = {'.raf', '.dng'}
 THUMBNAIL_SIZE = 300
 DEFAULT_TOP_N = 25
-
-# Analog folder detection and film type classification
-ANALOG_FOLDER_NAME = "Analog"
-
-# Lightroom catalog for checking camera profiles
-LR_CATALOG_PATH = Path(r"C:\Users\zefra\OneDrive\Pictures\Lightroom\Lightroom Catalog-v13-4.lrcat")
-LR_PATH_MAPPING = {"M:/Zefram Photography/": "Z:/Zefram Photography/"}
-
-# Film type patterns (case-insensitive matching on folder path)
-SLIDE_FILM_PATTERNS = [
-    "velvia", "ektachrome", "provia", "e100", "fujichrome", "kodachrome",
-    "astia", "sensia", "slide"
-]
-BW_FILM_PATTERNS = [
-    "tmax", "t-max", "hp5", "delta", "acros", "tri-x", "trix", "fp4",
-    "pan f", "panf", "xp2", "ilford", "fomapan", "kentmere", "rollei",
-    "ferrania", "orto"  # Ferrania Orto is B&W
-]
-ALREADY_PROCESSED_PATTERNS = [
-    "underdog", "nikon scan", "nikonscan", "processed", "converted"
-]
-
-# Cache for Lightroom camera profiles
-_lr_profile_cache: Optional[Dict[str, str]] = None
-
-
-def _get_lr_profile_cache() -> Dict[str, str]:
-    """Load camera profiles from Lightroom catalog (cached)."""
-    global _lr_profile_cache
-    if _lr_profile_cache is not None:
-        return _lr_profile_cache
-
-    _lr_profile_cache = {}
-    if not LR_CATALOG_PATH.exists():
-        return _lr_profile_cache
-
-    try:
-        import sqlite3
-        import re
-        conn = sqlite3.connect(f'file:{LR_CATALOG_PATH}?mode=ro', uri=True)
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT fo.pathFromRoot, f.baseName, f.extension, d.text
-            FROM Adobe_images i
-            JOIN AgLibraryFile f ON i.rootFile = f.id_local
-            JOIN AgLibraryFolder fo ON f.folder = fo.id_local
-            LEFT JOIN Adobe_imageDevelopSettings d ON i.id_local = d.image
-            WHERE fo.pathFromRoot LIKE '%Analog%' AND d.text IS NOT NULL
-        """)
-        for row in cursor.fetchall():
-            path_from_root, basename, ext, text = row
-            # Extract CameraProfile from text
-            match = re.search(r'CameraProfile\s*=\s*"([^"]+)"', text or "")
-            if match:
-                # Build full path key (normalized)
-                full_path = f"Z:/{path_from_root}{basename}.{ext}".replace("\\", "/").lower()
-                _lr_profile_cache[full_path] = match.group(1)
-        conn.close()
-    except Exception as e:
-        print(f"Warning: Could not load Lightroom profiles: {e}")
-
-    return _lr_profile_cache
-
-
-def get_lightroom_profile(path: Path) -> Optional[str]:
-    """Get the Lightroom camera profile for an image, if any."""
-    cache = _get_lr_profile_cache()
-    normalized = str(path).replace("\\", "/").lower()
-    return cache.get(normalized)
-
-
-def detect_film_type(path: Path) -> str:
-    """
-    Detect the type of film for an Analog folder image.
-
-    Returns one of:
-    - 'slide': Slide/positive film (Velvia, Ektachrome, etc.) - no inversion
-    - 'bw_negative': Black & white negative - simple inversion
-    - 'color_negative': Color negative - color inversion with orange mask removal
-    - 'already_processed': Already inverted (external tools like Nikon Scan) - no inversion
-    - 'not_analog': Not from Analog folder - no processing
-
-    Key insight: Lightroom edits (including Negative Lab Pro) are NOT baked into
-    RAW/DNG files or Smart Previews. So even if LR has the "Negative Lab" profile,
-    we still need to invert the raw data when loading it for CLIP embedding.
-
-    Only truly pre-processed files (TIF from Nikon Scan, Underdog output) skip inversion.
-    """
-    if ANALOG_FOLDER_NAME not in path.parts:
-        return 'not_analog'
-
-    path_lower = str(path).lower()
-    ext_lower = path.suffix.lower()
-
-    # Check for externally pre-processed files (TIF/JPG from conversion software)
-    # These are output files that are already positive images
-    for pattern in ALREADY_PROCESSED_PATTERNS:
-        if pattern in path_lower:
-            # Only TIF/JPG from these folders are pre-processed
-            # DNG files are still raw negatives
-            if ext_lower in ('.tif', '.tiff', '.jpg', '.jpeg'):
-                return 'already_processed'
-
-    # For RAW files (DNG, RAF), check Lightroom profile for film type hints
-    lr_profile = get_lightroom_profile(path)
-    if lr_profile:
-        lr_profile_lower = lr_profile.lower()
-        # "Negative Lab" means it's a color negative (LR has it converted, but raw is still negative)
-        if "negative lab" in lr_profile_lower:
-            return 'color_negative'
-        # "Embedded" profile typically means slide film scanned with no conversion
-        if lr_profile_lower == "embedded":
-            # Check if it's actually slide film via folder name
-            for pattern in SLIDE_FILM_PATTERNS:
-                if pattern in path_lower:
-                    return 'slide'
-
-    # Check for slide film (no inversion needed)
-    for pattern in SLIDE_FILM_PATTERNS:
-        if pattern in path_lower:
-            return 'slide'
-
-    # Check for B&W film (simple inversion)
-    for pattern in BW_FILM_PATTERNS:
-        if pattern in path_lower:
-            return 'bw_negative'
-
-    # Default for Analog folder: assume color negative (needs full color inversion)
-    return 'color_negative'
-
-
-def is_analog_negative(path: Path) -> bool:
-    """Check if the image needs negative inversion (legacy compatibility)."""
-    film_type = detect_film_type(path)
-    return film_type in ('bw_negative', 'color_negative')
-
-
-def invert_bw_negative(image: Image.Image) -> Image.Image:
-    """
-    Invert a black & white negative film scan.
-
-    Simple inversion with auto-levels, no orange mask removal needed.
-    """
-    arr = np.array(image, dtype=np.float32)
-
-    # Convert to grayscale if color
-    if len(arr.shape) == 3:
-        gray = 0.299 * arr[:, :, 0] + 0.587 * arr[:, :, 1] + 0.114 * arr[:, :, 2]
-    else:
-        gray = arr
-
-    # Invert
-    gray = 255.0 - gray
-
-    # Auto-levels
-    p_low = np.percentile(gray, 1)
-    p_high = np.percentile(gray, 99)
-    if p_high > p_low:
-        gray = (gray - p_low) * 255.0 / (p_high - p_low)
-    gray = np.clip(gray, 0, 255).astype(np.uint8)
-
-    # Return as RGB (grayscale values in all channels)
-    return Image.fromarray(np.stack([gray, gray, gray], axis=-1))
-
-
-def invert_color_negative(image: Image.Image) -> Image.Image:
-    """
-    Invert a color negative film scan to positive.
-
-    Applies:
-    1. RGB inversion (255 - pixel value)
-    2. Per-channel auto-levels to remove orange mask
-    3. Slight saturation boost
-
-    This is a simplified conversion suitable for CLIP embeddings.
-    Not as accurate as Negative Lab Pro but produces viewable results.
-    """
-    arr = np.array(image, dtype=np.float32)
-
-    # Step 1: Invert
-    arr = 255.0 - arr
-
-    # Step 2: Per-channel auto-levels to remove orange mask
-    for c in range(3):
-        channel = arr[:, :, c]
-        p_low = np.percentile(channel, 1)
-        p_high = np.percentile(channel, 99)
-        if p_high > p_low:
-            channel = (channel - p_low) * 255.0 / (p_high - p_low)
-            arr[:, :, c] = np.clip(channel, 0, 255)
-
-    # Step 3: Slight saturation boost (negatives often look flat after inversion)
-    gray = arr.mean(axis=2, keepdims=True)
-    saturation_boost = 1.2
-    arr = gray + (arr - gray) * saturation_boost
-    arr = np.clip(arr, 0, 255)
-
-    return Image.fromarray(arr.astype(np.uint8))
-
-
-def apply_film_processing(image: Image.Image, path: Path) -> Image.Image:
-    """
-    Apply appropriate processing for analog film based on film type.
-
-    Returns the processed image.
-    """
-    film_type = detect_film_type(path)
-
-    if film_type == 'bw_negative':
-        return invert_bw_negative(image)
-    elif film_type == 'color_negative':
-        return invert_color_negative(image)
-    else:
-        # slide, already_processed, or not_analog - no processing
-        return image
 
 
 @dataclass
@@ -267,94 +48,15 @@ class ImageResult:
     source_type: str  # 'jpg', 'raw_embedded', 'raw_converted', 'smart_preview'
 
 
-def get_sp_mapping() -> Dict[Path, Path]:
-    """Get smart preview mapping (lazy-loaded)."""
-    global _sp_mapping
-    if _sp_mapping is None:
-        if SP_MAPPING_CACHE.exists():
-            try:
-                with open(SP_MAPPING_CACHE, 'rb') as f:
-                    _sp_mapping = pickle.load(f)
-                print(f"Loaded {len(_sp_mapping)} smart preview mappings")
-            except Exception as e:
-                print(f"Warning: Could not load SP mapping: {e}")
-                _sp_mapping = {}
-        else:
-            print("Smart preview mapping not found. Run smart_preview_mapper.py to build it.")
-            _sp_mapping = {}
-    return _sp_mapping
+def get_load_stats() -> Dict[str, int]:
+    """Get image loading statistics."""
+    return _load_stats.copy()
 
 
-def load_smart_preview(sp_path: Path, original_path: Optional[Path] = None) -> Optional[Image.Image]:
-    """
-    Load smart preview DNG and convert to PIL Image.
-
-    Smart Preview DNGs don't work with rawpy, so we extract the embedded JPEG
-    or use PIL directly. For Analog folder images, applies negative inversion.
-
-    Args:
-        sp_path: Path to the smart preview DNG
-        original_path: Path to the original file (used to detect Analog folder)
-    """
-    img = None
-
-    # Method 1: Try extracting embedded JPEG (most reliable for Smart Previews)
-    try:
-        with open(sp_path, 'rb') as f:
-            data = f.read()
-
-        jpeg_start = data.find(b'\xff\xd8\xff')
-        if jpeg_start != -1:
-            jpeg_end = data.find(b'\xff\xd9', jpeg_start + 1000)
-            if jpeg_end != -1:
-                jpeg_data = data[jpeg_start:jpeg_end + 2]
-                from io import BytesIO
-                img = Image.open(BytesIO(jpeg_data))
-                img.load()
-                img = img.convert('RGB')
-    except Exception:
-        pass
-
-    # Method 2: Try PIL directly
-    if img is None:
-        try:
-            img = Image.open(sp_path).convert('RGB')
-        except Exception:
-            pass
-
-    # Method 3: Fall back to rawpy (rarely works for Smart Previews)
-    if img is None:
-        try:
-            with rawpy.imread(str(sp_path)) as raw:
-                rgb = raw.postprocess(
-                    use_camera_wb=True,
-                    no_auto_bright=False,
-                    output_bps=8
-                )
-                img = Image.fromarray(rgb)
-        except Exception:
-            return None
-
-    # Apply film processing for Analog folder images
-    if img is not None and original_path is not None:
-        img = apply_film_processing(img, original_path)
-
-    return img
-
-
-def get_sp_stats() -> Dict[str, int]:
-    """Get smart preview usage statistics."""
-    sp_mapping = get_sp_mapping()
-    return {
-        **_sp_stats,
-        "total_mappings": len(sp_mapping)
-    }
-
-
-def reset_sp_stats():
-    """Reset smart preview statistics."""
-    global _sp_stats
-    _sp_stats = {"sp_used": 0, "original_used": 0}
+def reset_load_stats():
+    """Reset image loading statistics."""
+    global _load_stats
+    _load_stats = {"lr_preview": 0, "original": 0, "failed": 0}
 
 
 class EmbeddingCache:
@@ -475,42 +177,38 @@ def convert_raw_to_image(raw_path: Path) -> Optional[Image.Image]:
     return None
 
 
-def load_image(path: Path, skip_raw_conversion: bool = True, use_smart_preview: bool = True) -> Tuple[Optional[Image.Image], str]:
+def load_image(path: Path, skip_raw_conversion: bool = True) -> Tuple[Optional[Image.Image], str]:
     """
-    Load image with preference: Smart Preview > JPG > embedded RAW preview > RAW conversion.
+    Load image with preference: Lightroom Preview > JPG > embedded RAW preview.
     Returns (image, source_type).
+
+    Lightroom previews are preferred because they include all edits (crops, color
+    corrections, exposure adjustments, negative inversions, etc.).
 
     Args:
         skip_raw_conversion: If True, skip full RAW conversion (faster, avoids crashes)
-        use_smart_preview: If True, use Lightroom Smart Preview when available (has edits baked in)
     """
-    global _sp_stats
+    global _load_stats
     try:
         ext = path.suffix.lower()
 
-        # Check for Smart Preview first (has Lightroom edits baked in)
-        if use_smart_preview:
-            sp_mapping = get_sp_mapping()
-            if path in sp_mapping:
-                sp_path = sp_mapping[path]
-                img = load_smart_preview(sp_path, original_path=path)
-                if img:
-                    _sp_stats["sp_used"] += 1
-                    return img.convert('RGB'), 'smart_preview'
+        # Try Lightroom preview first (has all edits baked in)
+        lr_preview = load_lightroom_preview(path, min_size=200)
+        if lr_preview:
+            _load_stats["lr_preview"] += 1
+            return lr_preview.convert('RGB'), 'lr_preview'
 
-        # Track fallback to original
-        _sp_stats["original_used"] += 1
+        # Fall back to loading original file
+        _load_stats["original"] += 1
 
         # For regular images, just load directly
         if ext in {'.jpg', '.jpeg', '.tiff', '.tif'}:
             try:
                 img = Image.open(path)
                 img.load()  # Force load to catch errors early
-                img = img.convert('RGB')
-                # Apply film processing for Analog folder
-                img = apply_film_processing(img, path)
-                return img, 'jpg'
-            except Exception as e:
+                return img.convert('RGB'), 'original'
+            except Exception:
+                _load_stats["failed"] += 1
                 return None, 'error'
 
         # For RAW files, check if companion JPG exists
@@ -521,10 +219,7 @@ def load_image(path: Path, skip_raw_conversion: bool = True, use_smart_preview: 
                     try:
                         img = Image.open(jpg_path)
                         img.load()
-                        img = img.convert('RGB')
-                        # Apply film processing for Analog folder
-                        img = apply_film_processing(img, path)
-                        return img, 'jpg'
+                        return img.convert('RGB'), 'original'
                     except:
                         pass
 
@@ -533,20 +228,14 @@ def load_image(path: Path, skip_raw_conversion: bool = True, use_smart_preview: 
                 try:
                     img = extract_embedded_jpeg_from_raf(path)
                     if img:
-                        img = img.convert('RGB')
-                        # Apply film processing for Analog folder
-                        img = apply_film_processing(img, path)
-                        return img, 'raw_embedded'
+                        return img.convert('RGB'), 'raw_embedded'
                 except:
                     pass
             elif ext == '.dng':
                 try:
                     img = extract_embedded_jpeg_from_dng(path)
                     if img:
-                        img = img.convert('RGB')
-                        # Apply film processing for Analog folder
-                        img = apply_film_processing(img, path)
-                        return img, 'raw_embedded'
+                        return img.convert('RGB'), 'raw_embedded'
                 except:
                     pass
 
@@ -559,8 +248,10 @@ def load_image(path: Path, skip_raw_conversion: bool = True, use_smart_preview: 
                 except:
                     pass
 
+        _load_stats["failed"] += 1
         return None, 'error'
     except Exception:
+        _load_stats["failed"] += 1
         return None, 'error'
 
 
@@ -634,8 +325,8 @@ class PhotoSearcher:
         """Build or update the image embedding index."""
         import gc
 
-        # Reset smart preview stats
-        reset_sp_stats()
+        # Reset loading stats
+        reset_load_stats()
 
         self.image_paths = find_images(source_dir)
         embeddings = []
@@ -700,13 +391,12 @@ class PhotoSearcher:
                     f.write(f"{e}\n")
             print(f"Error log saved to: {log_path}")
 
-        # Report smart preview usage
-        sp_stats = get_sp_stats()
-        if sp_stats["total_mappings"] > 0:
-            print(f"\nSmart Preview usage:")
-            print(f"  Loaded from Smart Preview: {sp_stats['sp_used']}")
-            print(f"  Loaded from original: {sp_stats['original_used']}")
-            print(f"  Available mappings: {sp_stats['total_mappings']}")
+        # Report loading stats
+        load_stats = get_load_stats()
+        print(f"\nImage loading stats:")
+        print(f"  Loaded from Lightroom preview: {load_stats['lr_preview']}")
+        print(f"  Loaded from original file: {load_stats['original']}")
+        print(f"  Failed to load: {load_stats['failed']}")
 
     def search(self, query: str, top_n: int = DEFAULT_TOP_N) -> List[ImageResult]:
         """Search for images matching the text query."""
@@ -874,29 +564,12 @@ def main():
                         help="Copy top results to working directory")
     parser.add_argument("--source", type=Path, default=PHOTO_SOURCE,
                         help=f"Photo source directory (default: {PHOTO_SOURCE})")
-    parser.add_argument("--no-smart-preview", action="store_true",
-                        help="Disable Smart Preview usage (use original files only)")
-    parser.add_argument("--rebuild-sp-cache", action="store_true",
-                        help="Rebuild the smart preview mapping from Lightroom")
 
     args = parser.parse_args()
 
     # Ensure directories exist
     WORKING_DIR.mkdir(exist_ok=True)
     RESULTS_DIR.mkdir(exist_ok=True)
-
-    # Handle smart preview cache rebuild
-    if args.rebuild_sp_cache:
-        print("Rebuilding smart preview mapping...")
-        from smart_preview_mapper import build_mapping
-        build_mapping(force_rebuild=True)
-        print("Smart preview mapping rebuilt.")
-
-    # Configure smart preview usage globally
-    if args.no_smart_preview:
-        global _sp_mapping
-        _sp_mapping = {}  # Empty mapping disables smart preview usage
-        print("Smart Previews disabled.")
 
     # Initialize searcher
     searcher = PhotoSearcher()

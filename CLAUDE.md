@@ -13,8 +13,8 @@ A Python tool to search through a photo library for images matching specific mot
 ## Photo Library Structure
 - Organized by capture event or source (e.g., "Bike Rides", "Photo Walk")
 - `Z:\Zefram Photography\Analog\` - Film scans organized by camera and roll
-- When RAW (.RAF, .DNG) and JPG share same name, JPG is camera-processed output
-- Preference: camera JPG > embedded RAW preview > RAW conversion
+- All files managed in Lightroom Classic catalog
+- Preference: Lightroom preview (with edits) > camera JPG > embedded RAW preview
 
 ## Running the Tool
 ```bash
@@ -31,12 +31,12 @@ conda run -n photomotifs python photo_search.py --index-only
 conda run -n photomotifs python photo_search.py "query" --copy
 ```
 
-## Current Status (2026-01-10)
+## Current Status (2026-01-11)
 - **Total Images:** 7,908 unique
-- **Cached Embeddings:** 7,870
-- **Analog Images:** 1,298 (with film type detection)
+- **Cached Embeddings:** 7,887
+- **Lightroom Preview Coverage:** 98.9% (7,822 images use LR previews with edits)
 - **GPU:** NVIDIA RTX 3080 (CUDA enabled)
-- **Performance:** ~10 images/sec, full library scan ~6.5 minutes
+- **Performance:** ~45 images/sec, full library reindex ~4 minutes
 
 ## Project Structure
 ```
@@ -44,20 +44,17 @@ photoMotifs/
 ├── photo_search.py         # Main search tool
 ├── tag_generator.py        # Tag generation and filtered search
 ├── src/                    # Source modules
-│   ├── lightroom_integration.py
-│   └── smart_preview_mapper.py
-├── scripts/                # Utility scripts
-│   └── reindex_analog.py
+│   ├── lightroom_integration.py    # Read ratings, keywords from LR catalog
+│   └── lightroom_preview_loader.py # Extract rendered previews from LR cache
 ├── tests/                  # Test files
 │   ├── benchmark.py
 │   ├── test_*.py
 │   └── fixtures/
 ├── cache/                  # Cached data (gitignored)
 │   ├── embeddings_cache.pkl
-│   ├── smart_preview_mapping.pkl
 │   └── tag_database.json
 ├── results/                # HTML reports and thumbnails
-└── old/                    # Deprecated exploration scripts
+└── old/                    # Deprecated scripts
 ```
 
 ## Technical Details
@@ -66,28 +63,31 @@ photoMotifs/
 - **Thumbnail size:** 300px for HTML reports
 - **Default results:** Top 25
 
-## Analog Film Processing
-Film scans in `Z:\Zefram Photography\Analog\` are auto-detected by type:
-- **Slide films** (Velvia, Ektachrome, Provia): No inversion needed
-- **B&W negatives** (TMAX, HP5, Ilford): Simple grayscale inversion
-- **Color negatives** (Portra, CineStill, Ektar): Orange mask removal + inversion
-- **Already processed** (Underdog, Nikon Scan): No processing
+## Lightroom Preview Integration
 
-Detection logic in `photo_search.py`:
-- `detect_film_type(path)` - Returns 'slide', 'bw_negative', 'color_negative', 'already_processed', or 'not_analog'
-- `apply_film_processing(image, path)` - Applies correct processing based on film type
-- Checks Lightroom profile first ("Negative Lab v2.3" = already converted)
-- Falls back to folder name pattern matching
+All images are loaded from Lightroom's rendered preview cache instead of original files. This ensures CLIP sees:
+- **Correct colors**: Lightroom edits (exposure, white balance, color grading) are baked in
+- **Proper crops**: Cropped images show only the visible portion
+- **Converted negatives**: Film negatives with Negative Lab Pro conversions appear as positives
+- **Consistent quality**: All images rendered at similar quality levels
 
-To reindex Analog after changes:
+### How It Works
+1. `src/lightroom_preview_loader.py` maps file paths to Lightroom catalog image IDs
+2. Looks up preview UUID and digest from `previews.db`
+3. Finds rendered JPEG pyramid files in `Previews.lrdata` folder structure
+4. Returns largest available preview (typically 1024px or 2048px)
+5. Falls back to original file only if no LR preview exists (~1% of images)
+
+### Force Reindex
+If Lightroom edits change significantly, reindex to update embeddings:
 ```bash
-conda run -n photomotifs python scripts/reindex_analog.py
+conda run -n photomotifs python photo_search.py --index-only --force-reindex
 ```
 
 ## Known Issues
-1. DNG files without embedded JPEG previews fail
+1. Images not in Lightroom catalog (~1%) fall back to original/embedded JPEG
 2. rawpy disabled due to segfaults on some files
-3. First image takes ~500ms (GPU warmup), then ~50-100ms each
+3. First batch takes ~500ms (GPU warmup), then ~45 images/sec
 
 ## Example Queries
 - "portraits of people"
@@ -148,12 +148,13 @@ conda run -n photomotifs python src/lightroom_integration.py
 - **Keywords:** 32 keywords, 660 images tagged
 - **Collections:** 15 collections (Nature, Monochrome, Creative, etc.)
 
-### Lightroom Previews (WIP)
-- Smart Previews: 7,383 DNG files with edits baked in
-- Regular Previews: `.lrprev` files (proprietary format - extraction not implemented)
-- **Note:** To use Lightroom-edited images for CLIP, would need to regenerate embeddings
+### Lightroom Previews (Implemented)
+- **Pyramid previews**: JPEG files stored in `Previews.lrdata` folder with all edits baked in
+- **Coverage**: 98.9% of library images have LR previews available
+- **Location**: `C:\Users\zefra\OneDrive\Pictures\Lightroom\Lightroom Catalog-v13-4 Previews.lrdata`
+- All CLIP embeddings are now generated from Lightroom-edited previews
 
-### Known Limitations
-1. Smart Preview UUID mapping is incomplete (schema is complex)
-2. `.lrprev` format is proprietary Adobe container (not standard JPEG)
-3. Current CLIP embeddings are from original/embedded JPEGs, not Lightroom-edited versions
+### Preview Format Details
+- Previews stored as bare JPEG pyramid files with size suffixes (e.g., `{uuid}-{digest}_1024`)
+- `.lrprev` container files also supported (contain embedded JPEG data)
+- Previews organized in subfolders by UUID prefix (e.g., `A/ABCD/`)
