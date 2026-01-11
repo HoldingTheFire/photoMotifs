@@ -25,7 +25,7 @@ from photo_search import (
 )
 
 # Tag database path
-TAG_DB_FILE = Path(r"C:\projects\photoMotifs\tag_database.json")
+TAG_DB_FILE = Path(r"C:\projects\photoMotifs\cache\tag_database.json")
 
 # Hierarchical tag categories with CLIP-friendly descriptions
 TAG_CATEGORIES = {

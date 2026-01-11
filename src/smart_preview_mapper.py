@@ -17,7 +17,7 @@ import numpy as np
 # Paths
 CATALOG_PATH = Path(r"C:\Users\zefra\OneDrive\Pictures\Lightroom\Lightroom Catalog-v13-4.lrcat")
 SP_DIR = Path(r"C:\Users\zefra\OneDrive\Pictures\Lightroom\Lightroom Catalog-v13-4 Smart Previews.lrdata")
-MAPPING_CACHE = Path(r"C:\projects\photoMotifs\smart_preview_mapping.pkl")
+MAPPING_CACHE = Path(r"C:\projects\photoMotifs\cache\smart_preview_mapping.pkl")
 
 PATH_MAPPINGS = {
     "M:/Zefram Photography/": "Z:/Zefram Photography/",

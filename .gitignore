@@ -1,7 +1,5 @@
 # Cache files
-embeddings_cache.pkl
-smart_preview_mapping.pkl
-tag_database.json
+cache/
 *.pyc
 __pycache__/
 
@@ -17,16 +15,11 @@ working/
 .DS_Store
 Thumbs.db
 
-# Test/debug scripts
-test_*.py
-debug_*.py
-check_*.py
-show_*.py
-explore_*.py
-analyze_*.py
-find_*.py
-search_*.py
-match_*.py
+# Old/deprecated scripts
+old/
+
+# Test fixtures (generated images)
+tests/fixtures/
 
 # Env
 .env

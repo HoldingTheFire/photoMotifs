@@ -28,11 +28,11 @@ import rawpy
 PHOTO_SOURCE = Path(r"Z:\Zefram Photography")
 WORKING_DIR = Path(r"C:\projects\photoMotifs\working")
 RESULTS_DIR = Path(r"C:\projects\photoMotifs\results")
-CACHE_FILE = Path(r"C:\projects\photoMotifs\embeddings_cache.pkl")
+CACHE_FILE = Path(r"C:\projects\photoMotifs\cache\embeddings_cache.pkl")
 
 # Smart Preview configuration
 SP_DIR = Path(r"C:\Users\zefra\OneDrive\Pictures\Lightroom\Lightroom Catalog-v13-4 Smart Previews.lrdata")
-SP_MAPPING_CACHE = Path(r"C:\projects\photoMotifs\smart_preview_mapping.pkl")
+SP_MAPPING_CACHE = Path(r"C:\projects\photoMotifs\cache\smart_preview_mapping.pkl")
 
 # Global smart preview mapping (lazy-loaded)
 _sp_mapping: Optional[Dict[Path, Path]] = None
@@ -43,13 +43,149 @@ RAW_EXTENSIONS = {'.raf', '.dng'}
 THUMBNAIL_SIZE = 300
 DEFAULT_TOP_N = 25
 
-# Analog folder detection
+# Analog folder detection and film type classification
 ANALOG_FOLDER_NAME = "Analog"
+
+# Lightroom catalog for checking camera profiles
+LR_CATALOG_PATH = Path(r"C:\Users\zefra\OneDrive\Pictures\Lightroom\Lightroom Catalog-v13-4.lrcat")
+LR_PATH_MAPPING = {"M:/Zefram Photography/": "Z:/Zefram Photography/"}
+
+# Film type patterns (case-insensitive matching on folder path)
+SLIDE_FILM_PATTERNS = [
+    "velvia", "ektachrome", "provia", "e100", "fujichrome", "kodachrome",
+    "astia", "sensia", "slide"
+]
+BW_FILM_PATTERNS = [
+    "tmax", "t-max", "hp5", "delta", "acros", "tri-x", "trix", "fp4",
+    "pan f", "panf", "xp2", "ilford", "fomapan", "kentmere", "rollei",
+    "ferrania", "orto"  # Ferrania Orto is B&W
+]
+ALREADY_PROCESSED_PATTERNS = [
+    "underdog", "nikon scan", "nikonscan", "processed", "converted"
+]
+
+# Cache for Lightroom camera profiles
+_lr_profile_cache: Optional[Dict[str, str]] = None
+
+
+def _get_lr_profile_cache() -> Dict[str, str]:
+    """Load camera profiles from Lightroom catalog (cached)."""
+    global _lr_profile_cache
+    if _lr_profile_cache is not None:
+        return _lr_profile_cache
+
+    _lr_profile_cache = {}
+    if not LR_CATALOG_PATH.exists():
+        return _lr_profile_cache
+
+    try:
+        import sqlite3
+        import re
+        conn = sqlite3.connect(f'file:{LR_CATALOG_PATH}?mode=ro', uri=True)
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT fo.pathFromRoot, f.baseName, f.extension, d.text
+            FROM Adobe_images i
+            JOIN AgLibraryFile f ON i.rootFile = f.id_local
+            JOIN AgLibraryFolder fo ON f.folder = fo.id_local
+            LEFT JOIN Adobe_imageDevelopSettings d ON i.id_local = d.image
+            WHERE fo.pathFromRoot LIKE '%Analog%' AND d.text IS NOT NULL
+        """)
+        for row in cursor.fetchall():
+            path_from_root, basename, ext, text = row
+            # Extract CameraProfile from text
+            match = re.search(r'CameraProfile\s*=\s*"([^"]+)"', text or "")
+            if match:
+                # Build full path key (normalized)
+                full_path = f"Z:/{path_from_root}{basename}.{ext}".replace("\\", "/").lower()
+                _lr_profile_cache[full_path] = match.group(1)
+        conn.close()
+    except Exception as e:
+        print(f"Warning: Could not load Lightroom profiles: {e}")
+
+    return _lr_profile_cache
+
+
+def get_lightroom_profile(path: Path) -> Optional[str]:
+    """Get the Lightroom camera profile for an image, if any."""
+    cache = _get_lr_profile_cache()
+    normalized = str(path).replace("\\", "/").lower()
+    return cache.get(normalized)
+
+
+def detect_film_type(path: Path) -> str:
+    """
+    Detect the type of film for an Analog folder image.
+
+    Returns one of:
+    - 'slide': Slide/positive film (Velvia, Ektachrome, etc.) - no inversion
+    - 'bw_negative': Black & white negative - simple inversion
+    - 'color_negative': Color negative - color inversion with orange mask removal
+    - 'already_processed': Already inverted (Negative Lab Pro, Underdog, etc.) - no inversion
+    - 'not_analog': Not from Analog folder - no processing
+    """
+    if ANALOG_FOLDER_NAME not in path.parts:
+        return 'not_analog'
+
+    path_lower = str(path).lower()
+
+    # Check Lightroom profile first - most reliable indicator
+    lr_profile = get_lightroom_profile(path)
+    if lr_profile:
+        if "negative lab" in lr_profile.lower():
+            return 'already_processed'
+
+    # Check folder patterns for already processed images
+    for pattern in ALREADY_PROCESSED_PATTERNS:
+        if pattern in path_lower:
+            return 'already_processed'
+
+    # Check for slide film (no inversion needed)
+    for pattern in SLIDE_FILM_PATTERNS:
+        if pattern in path_lower:
+            return 'slide'
+
+    # Check for B&W film (simple inversion)
+    for pattern in BW_FILM_PATTERNS:
+        if pattern in path_lower:
+            return 'bw_negative'
+
+    # Default: assume color negative (needs full color inversion)
+    return 'color_negative'
 
 
 def is_analog_negative(path: Path) -> bool:
-    """Check if the image is from the Analog folder (scanned film negatives)."""
-    return ANALOG_FOLDER_NAME in path.parts
+    """Check if the image needs negative inversion (legacy compatibility)."""
+    film_type = detect_film_type(path)
+    return film_type in ('bw_negative', 'color_negative')
+
+
+def invert_bw_negative(image: Image.Image) -> Image.Image:
+    """
+    Invert a black & white negative film scan.
+
+    Simple inversion with auto-levels, no orange mask removal needed.
+    """
+    arr = np.array(image, dtype=np.float32)
+
+    # Convert to grayscale if color
+    if len(arr.shape) == 3:
+        gray = 0.299 * arr[:, :, 0] + 0.587 * arr[:, :, 1] + 0.114 * arr[:, :, 2]
+    else:
+        gray = arr
+
+    # Invert
+    gray = 255.0 - gray
+
+    # Auto-levels
+    p_low = np.percentile(gray, 1)
+    p_high = np.percentile(gray, 99)
+    if p_high > p_low:
+        gray = (gray - p_low) * 255.0 / (p_high - p_low)
+    gray = np.clip(gray, 0, 255).astype(np.uint8)
+
+    # Return as RGB (grayscale values in all channels)
+    return Image.fromarray(np.stack([gray, gray, gray], axis=-1))
 
 
 def invert_color_negative(image: Image.Image) -> Image.Image:
@@ -70,7 +206,6 @@ def invert_color_negative(image: Image.Image) -> Image.Image:
     arr = 255.0 - arr
 
     # Step 2: Per-channel auto-levels to remove orange mask
-    # Find the 1st and 99th percentile for each channel and stretch
     for c in range(3):
         channel = arr[:, :, c]
         p_low = np.percentile(channel, 1)
@@ -80,13 +215,29 @@ def invert_color_negative(image: Image.Image) -> Image.Image:
             arr[:, :, c] = np.clip(channel, 0, 255)
 
     # Step 3: Slight saturation boost (negatives often look flat after inversion)
-    # Convert to HSV-like approach: boost deviation from gray
     gray = arr.mean(axis=2, keepdims=True)
     saturation_boost = 1.2
     arr = gray + (arr - gray) * saturation_boost
     arr = np.clip(arr, 0, 255)
 
     return Image.fromarray(arr.astype(np.uint8))
+
+
+def apply_film_processing(image: Image.Image, path: Path) -> Image.Image:
+    """
+    Apply appropriate processing for analog film based on film type.
+
+    Returns the processed image.
+    """
+    film_type = detect_film_type(path)
+
+    if film_type == 'bw_negative':
+        return invert_bw_negative(image)
+    elif film_type == 'color_negative':
+        return invert_color_negative(image)
+    else:
+        # slide, already_processed, or not_analog - no processing
+        return image
 
 
 @dataclass
@@ -165,9 +316,9 @@ def load_smart_preview(sp_path: Path, original_path: Optional[Path] = None) -> O
         except Exception:
             return None
 
-    # Apply negative inversion for Analog folder images
-    if img is not None and original_path is not None and is_analog_negative(original_path):
-        img = invert_color_negative(img)
+    # Apply film processing for Analog folder images
+    if img is not None and original_path is not None:
+        img = apply_film_processing(img, original_path)
 
     return img
 
@@ -337,9 +488,8 @@ def load_image(path: Path, skip_raw_conversion: bool = True, use_smart_preview: 
                 img = Image.open(path)
                 img.load()  # Force load to catch errors early
                 img = img.convert('RGB')
-                # Apply inversion for Analog folder negatives
-                if is_analog_negative(path):
-                    img = invert_color_negative(img)
+                # Apply film processing for Analog folder
+                img = apply_film_processing(img, path)
                 return img, 'jpg'
             except Exception as e:
                 return None, 'error'
@@ -353,9 +503,8 @@ def load_image(path: Path, skip_raw_conversion: bool = True, use_smart_preview: 
                         img = Image.open(jpg_path)
                         img.load()
                         img = img.convert('RGB')
-                        # Apply inversion for Analog folder negatives
-                        if is_analog_negative(path):
-                            img = invert_color_negative(img)
+                        # Apply film processing for Analog folder
+                        img = apply_film_processing(img, path)
                         return img, 'jpg'
                     except:
                         pass
@@ -366,9 +515,8 @@ def load_image(path: Path, skip_raw_conversion: bool = True, use_smart_preview: 
                     img = extract_embedded_jpeg_from_raf(path)
                     if img:
                         img = img.convert('RGB')
-                        # Apply inversion for Analog folder negatives
-                        if is_analog_negative(path):
-                            img = invert_color_negative(img)
+                        # Apply film processing for Analog folder
+                        img = apply_film_processing(img, path)
                         return img, 'raw_embedded'
                 except:
                     pass
@@ -377,9 +525,8 @@ def load_image(path: Path, skip_raw_conversion: bool = True, use_smart_preview: 
                     img = extract_embedded_jpeg_from_dng(path)
                     if img:
                         img = img.convert('RGB')
-                        # Apply inversion for Analog folder negatives
-                        if is_analog_negative(path):
-                            img = invert_color_negative(img)
+                        # Apply film processing for Analog folder
+                        img = apply_film_processing(img, path)
                         return img, 'raw_embedded'
                 except:
                     pass

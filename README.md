@@ -72,7 +72,7 @@ WORKING_DIR = Path(r"C:\projects\photoMotifs\working")
 RESULTS_DIR = Path(r"C:\projects\photoMotifs\results")
 ```
 
-Lightroom catalog path in `smart_preview_mapper.py`:
+Lightroom catalog path in `src/smart_preview_mapper.py`:
 ```python
 CATALOG_PATH = Path(r"C:\Users\...\Lightroom Catalog.lrcat")
 SP_DIR = Path(r"C:\Users\...\Lightroom Catalog Smart Previews.lrdata")
@@ -82,20 +82,61 @@ SP_DIR = Path(r"C:\Users\...\Lightroom Catalog Smart Previews.lrdata")
 
 1. **CLIP Embeddings**: Images are converted to 512-dimensional vectors using OpenAI's CLIP model
 2. **Smart Preview Mapping**: Maps original files to Lightroom Smart Previews via capture date matching
-3. **Semantic Search**: Text queries are embedded and compared to image embeddings via cosine similarity
-4. **Caching**: Embeddings are cached to disk for fast subsequent searches
+3. **Film Type Detection**: Analog film scans are automatically processed based on film type
+4. **Semantic Search**: Text queries are embedded and compared to image embeddings via cosine similarity
+5. **Caching**: Embeddings are cached to disk for fast subsequent searches
 
-## Files
+## Analog Film Processing
 
-| File | Description |
-|------|-------------|
-| `photo_search.py` | Main search tool with CLIP embeddings |
-| `smart_preview_mapper.py` | Lightroom Smart Preview mapping |
-| `tag_generator.py` | Semantic tag generation |
-| `lightroom_integration.py` | Lightroom catalog metadata reading |
-| `embeddings_cache.pkl` | Cached CLIP embeddings |
-| `smart_preview_mapping.pkl` | Smart Preview path mappings |
-| `tag_database.json` | Semantic tags database |
+Film scans in the `Analog/` folder are automatically detected and processed appropriately:
+
+| Film Type | Examples | Processing |
+|-----------|----------|------------|
+| Slide film | Velvia, Ektachrome, Provia, Kodachrome | No inversion (positive) |
+| B&W negative | TMAX, HP5, Tri-X, Ilford, Delta | Simple grayscale inversion |
+| Color negative | Portra, Ektar, CineStill, Gold | Orange mask removal + inversion |
+| Already processed | Underdog, Nikon Scan | No processing |
+
+Detection uses:
+1. **Lightroom profile lookup** - "Negative Lab v2.3" indicates already converted
+2. **Folder name patterns** - Film stock names in path (e.g., "Roll 12 Fujifilm Velvia 50")
+
+### Reindex Analog Files
+```bash
+# Clear and rebuild embeddings for Analog folder
+python scripts/reindex_analog.py
+```
+
+## Project Structure
+
+```
+photoMotifs/
+├── photo_search.py              # Main search tool with CLIP embeddings
+├── tag_generator.py             # Semantic tag generation and filtered search
+├── README.md
+├── CLAUDE.md                    # AI assistant instructions
+├── .gitignore
+│
+├── src/                         # Source modules
+│   ├── lightroom_integration.py # Lightroom catalog metadata reading
+│   └── smart_preview_mapper.py  # Smart Preview path mapping
+│
+├── scripts/                     # Utility scripts
+│   └── reindex_analog.py        # Reindex analog film negatives
+│
+├── tests/                       # Test files
+│   ├── benchmark.py             # Performance benchmarks
+│   ├── test_*.py                # Various test scripts
+│   └── fixtures/                # Test images (generated)
+│
+├── cache/                       # Cached data (gitignored)
+│   ├── embeddings_cache.pkl     # CLIP embeddings
+│   ├── smart_preview_mapping.pkl # Smart Preview mappings
+│   └── tag_database.json        # Semantic tags database
+│
+├── results/                     # Search results HTML reports
+└── old/                         # Deprecated exploration scripts
+```
 
 ## Performance
 

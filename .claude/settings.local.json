@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(conda --version:*)",
+      "Bash(python:*)",
+      "Bash(dir \"Z:\\\\Zefram Photography\")",
+      "Bash(dir:*)",
+      "Bash(powershell -Command \"Get-ChildItem ''Z:\\\\Zefram Photography\\\\'' -Directory | Select-Object -First 20 Name\")",
+      "Bash(powershell -Command \"Get-ChildItem ''Z:\\\\Zefram Photography\\\\Analog'' -Directory | Select-Object Name\")",
+      "Bash(powershell -Command:*)",
+      "Bash(pip install:*)",
+      "Bash(pip index:*)",
+      "Bash(conda search:*)",
+      "Bash(conda activate:*)",
+      "Bash(conda run:*)",
+      "Bash(cd:*)",
+      "Bash(git remote add:*)",
+      "Bash(git add:*)"
+    ]
+  }
+}

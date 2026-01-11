@@ -7,7 +7,7 @@ A Python tool to search through a photo library for images matching specific mot
 - **Photo Source:** `Z:\Zefram Photography\` (READ-ONLY - never modify)
 - **Working Directory:** `C:\projects\photoMotifs\working\`
 - **Results Directory:** `C:\projects\photoMotifs\results\`
-- **Embeddings Cache:** `C:\projects\photoMotifs\embeddings_cache.pkl`
+- **Cache Directory:** `C:\projects\photoMotifs\cache\`
 - **Conda Environment:** `photomotifs`
 
 ## Photo Library Structure
@@ -31,19 +31,34 @@ conda run -n photomotifs python photo_search.py --index-only
 conda run -n photomotifs python photo_search.py "query" --copy
 ```
 
-## Current Status (2025-12-27)
+## Current Status (2026-01-10)
 - **Total Images:** 7,908 unique
-- **Cached Embeddings:** 7,532
-- **Failed to Process:** 377 (DNG files without embedded previews)
+- **Cached Embeddings:** 7,870
+- **Analog Images:** 1,298 (with film type detection)
 - **GPU:** NVIDIA RTX 3080 (CUDA enabled)
 - **Performance:** ~10 images/sec, full library scan ~6.5 minutes
 
-## Files
-- `photo_search.py` - Main search tool (571 lines)
-- `test_search.py` - Quick test on subset
-- `benchmark.py` - Performance benchmark
-- `embeddings_cache.pkl` - Cached CLIP embeddings (~16 MB)
-- `results/indexing_errors.log` - Files that failed to process
+## Project Structure
+```
+photoMotifs/
+├── photo_search.py         # Main search tool
+├── tag_generator.py        # Tag generation and filtered search
+├── src/                    # Source modules
+│   ├── lightroom_integration.py
+│   └── smart_preview_mapper.py
+├── scripts/                # Utility scripts
+│   └── reindex_analog.py
+├── tests/                  # Test files
+│   ├── benchmark.py
+│   ├── test_*.py
+│   └── fixtures/
+├── cache/                  # Cached data (gitignored)
+│   ├── embeddings_cache.pkl
+│   ├── smart_preview_mapping.pkl
+│   └── tag_database.json
+├── results/                # HTML reports and thumbnails
+└── old/                    # Deprecated exploration scripts
+```
 
 ## Technical Details
 - **Model:** `openai/clip-vit-base-patch32`
@@ -51,8 +66,26 @@ conda run -n photomotifs python photo_search.py "query" --copy
 - **Thumbnail size:** 300px for HTML reports
 - **Default results:** Top 25
 
+## Analog Film Processing
+Film scans in `Z:\Zefram Photography\Analog\` are auto-detected by type:
+- **Slide films** (Velvia, Ektachrome, Provia): No inversion needed
+- **B&W negatives** (TMAX, HP5, Ilford): Simple grayscale inversion
+- **Color negatives** (Portra, CineStill, Ektar): Orange mask removal + inversion
+- **Already processed** (Underdog, Nikon Scan): No processing
+
+Detection logic in `photo_search.py`:
+- `detect_film_type(path)` - Returns 'slide', 'bw_negative', 'color_negative', 'already_processed', or 'not_analog'
+- `apply_film_processing(image, path)` - Applies correct processing based on film type
+- Checks Lightroom profile first ("Negative Lab v2.3" = already converted)
+- Falls back to folder name pattern matching
+
+To reindex Analog after changes:
+```bash
+conda run -n photomotifs python scripts/reindex_analog.py
+```
+
 ## Known Issues
-1. DNG files without embedded JPEG previews fail (377 files)
+1. DNG files without embedded JPEG previews fail
 2. rawpy disabled due to segfaults on some files
 3. First image takes ~500ms (GPU warmup), then ~50-100ms each
 
@@ -99,14 +132,14 @@ conda run -n photomotifs python tag_generator.py --search "cute pet" --filter an
 - **Path Mapping:** Catalog uses `M:\Zefram Photography\`, actual files on `Z:\Zefram Photography\`
 
 ### What Works
-- `lightroom_integration.py` - Read ratings, picks, keywords, collections from catalog
+- `src/lightroom_integration.py` - Read ratings, picks, keywords, collections from catalog
 - Filter searches by Lightroom metadata (e.g., only 4+ star images)
 - 13,415 images in catalog with metadata
 
 ### Usage
 ```bash
 # Print catalog summary
-conda run -n photomotifs python lightroom_integration.py
+conda run -n photomotifs python src/lightroom_integration.py
 ```
 
 ### Available Metadata
