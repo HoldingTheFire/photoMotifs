@@ -288,7 +288,8 @@ def find_images(source_dir: Path) -> List[Path]:
 class PhotoSearcher:
     """CLIP-based photo search engine."""
 
-    def __init__(self, model_name: str = "openai/clip-vit-base-patch32"):
+    def __init__(self, model_name: str = "openai/clip-vit-base-patch32",
+                 cache_path: Optional[Path] = None):
         print(f"Loading CLIP model: {model_name}")
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         print(f"Using device: {self.device}")
@@ -297,7 +298,7 @@ class PhotoSearcher:
         self.processor = CLIPProcessor.from_pretrained(model_name, use_fast=True)
         self.model.eval()
 
-        self.cache = EmbeddingCache(CACHE_FILE)
+        self.cache = EmbeddingCache(cache_path or CACHE_FILE)
         self.image_paths: List[Path] = []
         self.embeddings: Optional[np.ndarray] = None
 
@@ -397,6 +398,89 @@ class PhotoSearcher:
         print(f"  Loaded from Lightroom preview: {load_stats['lr_preview']}")
         print(f"  Loaded from original file: {load_stats['original']}")
         print(f"  Failed to load: {load_stats['failed']}")
+
+    def index_images_with_progress(self, source_dir: Path, force_reindex: bool = False):
+        """
+        Build or update image embedding index with progress updates.
+        Yields progress tuples: (current, total, message)
+        For use with UI progress bars.
+        """
+        import gc
+
+        # Reset loading stats
+        reset_load_stats()
+
+        self.image_paths = find_images(source_dir)
+        total = len(self.image_paths)
+        embeddings = []
+        errors = []
+        new_embeddings = 0
+        save_interval = 100
+
+        yield (0, total, f"Found {total} images to index...")
+
+        for i, path in enumerate(self.image_paths):
+            # Check cache first
+            cached = self.cache.get(path)
+            if cached is not None and not force_reindex:
+                embeddings.append(cached)
+                if i % 100 == 0:
+                    yield (i + 1, total, f"Using cached: {path.name}")
+                continue
+
+            # Load and embed image
+            try:
+                image, source_type = load_image(path)
+                if image is None:
+                    errors.append(path)
+                    embeddings.append(np.zeros(512))
+                    continue
+
+                image.thumbnail((512, 512), Image.Resampling.LANCZOS)
+                embedding = self.compute_image_embedding(image)
+                embeddings.append(embedding)
+                self.cache.set(path, embedding)
+                new_embeddings += 1
+
+                del image
+
+                # Periodic cache save and memory cleanup
+                if new_embeddings % save_interval == 0:
+                    self.cache.save()
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    yield (i + 1, total, f"Saved checkpoint ({new_embeddings} new embeddings)")
+
+            except Exception as e:
+                errors.append(path)
+                embeddings.append(np.zeros(512))
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+            # Yield progress every 10 images
+            if i % 10 == 0:
+                yield (i + 1, total, f"Processing: {path.name[:40]}")
+
+        self.embeddings = np.vstack(embeddings)
+        self.cache.save()
+
+        # Final stats
+        load_stats = get_load_stats()
+        final_msg = (f"Complete! {new_embeddings} new embeddings. "
+                     f"LR preview: {load_stats['lr_preview']}, "
+                     f"Original: {load_stats['original']}, "
+                     f"Failed: {load_stats['failed']}")
+
+        if errors:
+            log_path = RESULTS_DIR / "indexing_errors.log"
+            with open(log_path, 'w') as f:
+                for e in errors:
+                    f.write(f"{e}\n")
+            final_msg += f" Errors logged to: {log_path}"
+
+        yield (total, total, final_msg)
 
     def search(self, query: str, top_n: int = DEFAULT_TOP_N) -> List[ImageResult]:
         """Search for images matching the text query."""

@@ -10,15 +10,19 @@ from pathlib import Path
 from typing import Optional, Dict, Tuple
 from PIL import Image
 
-# Lightroom paths
-LR_CATALOG_PATH = Path(r"C:\Users\zefra\OneDrive\Pictures\Lightroom\Lightroom Catalog-v13-4.lrcat")
-LR_PREVIEWS_DIR = Path(r"C:\Users\zefra\OneDrive\Pictures\Lightroom\Lightroom Catalog-v13-4 Previews.lrdata")
-LR_PREVIEWS_DB = LR_PREVIEWS_DIR / "previews.db"
-
-# Path mapping from catalog paths to actual file paths
-LR_PATH_MAPPING = {
+# Default Lightroom paths (can be overridden via configure())
+_DEFAULT_CATALOG_PATH = Path(r"C:\Users\zefra\OneDrive\Pictures\Lightroom\Lightroom Catalog-v13-4.lrcat")
+_DEFAULT_PREVIEWS_DIR = Path(r"C:\Users\zefra\OneDrive\Pictures\Lightroom\Lightroom Catalog-v13-4 Previews.lrdata")
+_DEFAULT_PATH_MAPPING = {
     "M:/Zefram Photography/": "Z:/Zefram Photography/",
     "M:\\Zefram Photography\\": "Z:\\Zefram Photography\\",
+}
+
+# Runtime configuration (use configure() to change)
+_config = {
+    'catalog_path': _DEFAULT_CATALOG_PATH,
+    'previews_dir': _DEFAULT_PREVIEWS_DIR,
+    'path_mappings': _DEFAULT_PATH_MAPPING.copy(),
 }
 
 # Cache for image ID lookups (path -> catalog image ID)
@@ -26,6 +30,36 @@ _image_id_cache: Optional[Dict[str, int]] = None
 
 # Cache for preview UUID lookups (image ID -> (preview UUID, digest))
 _preview_cache: Optional[Dict[int, Tuple[str, str]]] = None
+
+
+def configure(
+    catalog_path: Optional[Path] = None,
+    previews_dir: Optional[Path] = None,
+    path_mappings: Optional[Dict[str, str]] = None
+) -> None:
+    """
+    Configure Lightroom paths at runtime.
+    Call this before loading any previews to use custom paths.
+    Invalidates caches when paths change.
+    """
+    global _config, _image_id_cache, _preview_cache
+
+    if catalog_path is not None:
+        _config['catalog_path'] = catalog_path
+        _image_id_cache = None  # Invalidate cache
+
+    if previews_dir is not None:
+        _config['previews_dir'] = previews_dir
+        _preview_cache = None  # Invalidate cache
+
+    if path_mappings is not None:
+        _config['path_mappings'] = path_mappings
+        _image_id_cache = None  # Invalidate cache
+
+
+def get_config() -> Dict:
+    """Get current configuration."""
+    return _config.copy()
 
 
 def _normalize_path(path: Path) -> str:
@@ -36,12 +70,13 @@ def _normalize_path(path: Path) -> str:
 def _build_image_id_cache() -> Dict[str, int]:
     """Build cache mapping file paths to Lightroom image IDs."""
     cache = {}
+    catalog_path = _config['catalog_path']
 
-    if not LR_CATALOG_PATH.exists():
+    if not catalog_path.exists():
         return cache
 
     try:
-        conn = sqlite3.connect(f'file:{LR_CATALOG_PATH}?mode=ro', uri=True)
+        conn = sqlite3.connect(f'file:{catalog_path}?mode=ro', uri=True)
         cursor = conn.cursor()
 
         # Get all images with their paths
@@ -59,7 +94,7 @@ def _build_image_id_cache() -> Dict[str, int]:
             img_id, full_path = row
             if full_path:
                 # Apply path mapping and normalize
-                for old, new in LR_PATH_MAPPING.items():
+                for old, new in _config['path_mappings'].items():
                     full_path = full_path.replace(old, new)
                 normalized = full_path.replace("\\", "/").lower()
                 cache[normalized] = int(img_id)
@@ -74,12 +109,13 @@ def _build_image_id_cache() -> Dict[str, int]:
 def _build_preview_cache() -> Dict[int, Tuple[str, str]]:
     """Build cache mapping image IDs to preview UUIDs."""
     cache = {}
+    previews_db = _config['previews_dir'] / "previews.db"
 
-    if not LR_PREVIEWS_DB.exists():
+    if not previews_db.exists():
         return cache
 
     try:
-        conn = sqlite3.connect(f'file:{LR_PREVIEWS_DB}?mode=ro', uri=True)
+        conn = sqlite3.connect(f'file:{previews_db}?mode=ro', uri=True)
         cursor = conn.cursor()
 
         cursor.execute("SELECT imageId, uuid, digest FROM ImageCacheEntry")
@@ -131,7 +167,7 @@ def find_preview_file(preview_uuid: str, digest: str, min_size: int = 200) -> Op
     """
     # Preview files are stored in folders by UUID prefix
     uuid_prefix = preview_uuid[:4].upper()
-    preview_folder = LR_PREVIEWS_DIR / uuid_prefix[0] / uuid_prefix
+    preview_folder = _config['previews_dir'] / uuid_prefix[0] / uuid_prefix
 
     if not preview_folder.exists():
         return None

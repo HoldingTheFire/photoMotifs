@@ -1,0 +1,1 @@
+"""PhotoMotifs Gradio Web UI."""

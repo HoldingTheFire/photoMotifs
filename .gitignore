@@ -23,3 +23,6 @@ tests/fixtures/
 
 # Env
 .env
+
+# User configuration (contains local paths)
+config.json

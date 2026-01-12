@@ -31,6 +31,21 @@ conda run -n photomotifs python photo_search.py --index-only
 conda run -n photomotifs python photo_search.py "query" --copy
 ```
 
+## Web UI (Gradio)
+```bash
+# Launch the web interface
+conda run -n photomotifs python run_ui.py
+
+# With custom port
+conda run -n photomotifs python run_ui.py --port 8080
+```
+
+The web UI provides:
+- **Search Tab**: Query input, results gallery, copy to folder
+- **Indexing Tab**: Build/update embeddings with progress bar
+- **Tags Tab**: Generate and browse semantic tags
+- **Settings Tab**: Configure all paths (photo library, Lightroom, cache)
+
 ## Current Status (2026-01-11)
 - **Total Images:** 7,908 unique
 - **Cached Embeddings:** 7,887
@@ -41,18 +56,24 @@ conda run -n photomotifs python photo_search.py "query" --copy
 ## Project Structure
 ```
 photoMotifs/
-├── photo_search.py         # Main search tool
+├── photo_search.py         # Main search tool (CLI)
 ├── tag_generator.py        # Tag generation and filtered search
+├── run_ui.py               # Launch Gradio web UI
+├── config.json             # User settings (gitignored)
+├── ui/                     # Web UI components
+│   ├── app.py              # Main Gradio application
+│   ├── config.py           # Configuration management
+│   ├── state.py            # Shared app state
+│   └── components/         # UI tab modules
+│       ├── settings_tab.py
+│       ├── search_tab.py
+│       ├── indexing_tab.py
+│       └── tags_tab.py
 ├── src/                    # Source modules
 │   ├── lightroom_integration.py    # Read ratings, keywords from LR catalog
 │   └── lightroom_preview_loader.py # Extract rendered previews from LR cache
 ├── tests/                  # Test files
-│   ├── benchmark.py
-│   ├── test_*.py
-│   └── fixtures/
 ├── cache/                  # Cached data (gitignored)
-│   ├── embeddings_cache.pkl
-│   └── tag_database.json
 ├── results/                # HTML reports and thumbnails
 └── old/                    # Deprecated scripts
 ```
