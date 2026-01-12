@@ -25,22 +25,67 @@ from ui.components.indexing_tab import create_indexing_tab
 from ui.components.tags_tab import create_tags_tab
 
 
-# Custom CSS for better styling
-CUSTOM_CSS = """
-.gallery-item { cursor: pointer; }
-.selected-image { border: 3px solid #4CAF50; }
-.score-badge {
-    background: #4CAF50;
+# =============================================================================
+# THEME CUSTOMIZATION
+# =============================================================================
+# Modify these values to change the look and feel of the UI.
+
+# Primary accent color (buttons, highlights, links)
+PRIMARY_COLOR = "#4CAF50"  # Green - change to your preferred color
+
+# Font family for the UI
+FONT_FAMILY = "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
+
+# Create custom theme
+CUSTOM_THEME = gr.themes.Soft(
+    # Primary colors
+    primary_hue=gr.themes.colors.green,  # Options: red, orange, yellow, green, cyan, blue, purple, pink, gray
+    secondary_hue=gr.themes.colors.gray,
+    neutral_hue=gr.themes.colors.gray,
+
+    # Font settings
+    font=[gr.themes.GoogleFont("Inter"), "system-ui", "sans-serif"],
+    font_mono=[gr.themes.GoogleFont("JetBrains Mono"), "monospace"],
+).set(
+    # Fine-tune specific elements
+    button_primary_background_fill=PRIMARY_COLOR,
+    button_primary_background_fill_hover="#45a049",
+    block_title_text_weight="600",
+    block_label_text_size="sm",
+)
+
+# Custom CSS for additional styling
+CUSTOM_CSS = f"""
+/* Gallery styling */
+.gallery-item {{ cursor: pointer; }}
+.selected-image {{ border: 3px solid {PRIMARY_COLOR}; }}
+
+/* Score badge on results */
+.score-badge {{
+    background: {PRIMARY_COLOR};
     color: white;
     padding: 2px 8px;
     border-radius: 4px;
-}
-.status-bar {
+}}
+
+/* Status bar at bottom */
+.status-bar {{
     background: #f0f0f0;
     padding: 8px 12px;
     border-radius: 4px;
     margin-top: 10px;
-}
+}}
+
+/* Optional: Custom header styling */
+h1 {{
+    font-family: {FONT_FAMILY};
+    color: #333;
+}}
+
+/* Optional: Make buttons more prominent */
+.primary {{
+    font-weight: 600 !important;
+}}
 """
 
 
@@ -52,7 +97,7 @@ def create_app() -> gr.Blocks:
 
     with gr.Blocks(
         title="PhotoMotifs - Semantic Photo Search",
-        theme=gr.themes.Soft(),
+        theme=CUSTOM_THEME,
         css=CUSTOM_CSS
     ) as app:
 

@@ -1,148 +1,174 @@
 # PhotoMotifs
 
-CLIP-based semantic photo search tool with Lightroom Smart Preview integration.
+CLIP-based semantic photo search tool with Lightroom Preview integration.
 
 ## Features
 
-- **Semantic Search**: Find photos by natural language descriptions ("sunset portrait", "black and white street photography")
-- **Lightroom Integration**: Uses Smart Previews with your Lightroom edits baked in
+- **Web UI**: User-friendly Gradio interface for searching, indexing, and configuration
+- **Semantic Search**: Find photos by natural language descriptions ("sunset portrait", "rusty metal")
+- **Lightroom Integration**: Uses rendered previews with all your Lightroom edits baked in
 - **Semantic Tagging**: Auto-generated tags for subject, scene, style, mood, and technical aspects
-- **GPU Accelerated**: CUDA support for fast embedding computation
+- **GPU Accelerated**: CUDA support for fast embedding computation (~45 images/sec)
 
 ## Requirements
 
 - Python 3.10+
-- NVIDIA GPU with CUDA (tested on RTX 3080)
-- Lightroom Classic (for Smart Preview integration)
+- NVIDIA GPU with CUDA (recommended, tested on RTX 3080)
+- Lightroom Classic (for preview integration)
 
 ## Installation
 
 ```bash
+# Create conda environment
 conda create -n photomotifs python=3.10
 conda activate photomotifs
+
+# Install PyTorch with CUDA
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
-pip install transformers pillow tqdm rawpy numpy
+
+# Install dependencies
+pip install transformers pillow tqdm numpy gradio
 ```
 
-## Usage
+## Quick Start
 
-### Basic Search
+### Web UI (Recommended)
+
 ```bash
+python run_ui.py
+```
+
+This opens a browser with the PhotoMotifs interface:
+- **Search Tab**: Enter queries, view results gallery, copy files
+- **Indexing Tab**: Build/update embeddings with progress tracking
+- **Tags Tab**: Generate and browse semantic tags
+- **Settings Tab**: Configure paths to your photo library and Lightroom
+
+### Command Line
+
+```bash
+# Search for photos
 python photo_search.py "sunset landscape"
-python photo_search.py "portrait of a person" -n 50
-```
+python photo_search.py "portrait with bokeh" --top-n 50
 
-### Index Library
-```bash
-# First-time indexing
+# Index library (first time or after adding photos)
 python photo_search.py --index-only
 
 # Force reindex (regenerate all embeddings)
 python photo_search.py --force-reindex --index-only
 ```
 
-### Smart Preview Integration
-```bash
-# Rebuild Smart Preview mapping from Lightroom catalog
-python photo_search.py --rebuild-sp-cache
+## Configuration
 
-# Disable Smart Previews (use original files only)
-python photo_search.py --no-smart-preview "query"
+### Via Web UI (Recommended)
+1. Launch `python run_ui.py`
+2. Go to **Settings** tab
+3. Configure your paths and click **Save**
+
+### Via config.json
+Settings are saved to `config.json` (auto-generated on first run):
+
+```json
+{
+  "photo_source": "Z:\\Zefram Photography",
+  "working_dir": "C:\\projects\\photoMotifs\\working",
+  "results_dir": "C:\\projects\\photoMotifs\\results",
+  "cache_dir": "C:\\projects\\photoMotifs\\cache",
+  "lr_catalog_path": "C:\\Users\\...\\Lightroom Catalog.lrcat",
+  "lr_previews_dir": "C:\\Users\\...\\Lightroom Catalog Previews.lrdata"
+}
 ```
 
-### Semantic Tags
+## How It Works
+
+1. **Lightroom Previews**: Images are loaded from Lightroom's rendered preview cache, which includes all edits (exposure, color grading, crops, negative conversions)
+2. **CLIP Embeddings**: Images are converted to 512-dimensional vectors using OpenAI's CLIP model
+3. **Semantic Search**: Text queries are embedded and compared to image embeddings via cosine similarity
+4. **Caching**: Embeddings are cached to disk for fast subsequent searches
+
+### Why Lightroom Previews?
+
+- **Edit-aware search**: CLIP sees your edited photos, not raw originals
+- **Correct colors**: White balance, exposure, and color grading are baked in
+- **Proper crops**: Cropped images show only the visible portion
+- **Film negatives**: Negative Lab Pro conversions appear as positives
+- **98.9% coverage**: Most images in your catalog have previews available
+
+## Semantic Tags
+
+Pre-generate tags for faster filtered searches:
+
 ```bash
 # Generate tags for all images
 python tag_generator.py --generate
-
-# Force regenerate all tags
-python tag_generator.py --generate --force
 
 # Search with tag filtering
 python tag_generator.py --search "portrait" --filter people outdoor
 ```
 
-## Configuration
-
-Edit paths in `photo_search.py`:
-
-```python
-PHOTO_SOURCE = Path(r"Z:\Zefram Photography")  # Your photo library
-WORKING_DIR = Path(r"C:\projects\photoMotifs\working")
-RESULTS_DIR = Path(r"C:\projects\photoMotifs\results")
-```
-
-Lightroom catalog path in `src/smart_preview_mapper.py`:
-```python
-CATALOG_PATH = Path(r"C:\Users\...\Lightroom Catalog.lrcat")
-SP_DIR = Path(r"C:\Users\...\Lightroom Catalog Smart Previews.lrdata")
-```
-
-## How It Works
-
-1. **CLIP Embeddings**: Images are converted to 512-dimensional vectors using OpenAI's CLIP model
-2. **Smart Preview Mapping**: Maps original files to Lightroom Smart Previews via capture date matching
-3. **Film Type Detection**: Analog film scans are automatically processed based on film type
-4. **Semantic Search**: Text queries are embedded and compared to image embeddings via cosine similarity
-5. **Caching**: Embeddings are cached to disk for fast subsequent searches
-
-## Analog Film Processing
-
-Film scans in the `Analog/` folder are automatically detected and processed appropriately:
-
-| Film Type | Examples | Processing |
-|-----------|----------|------------|
-| Slide film | Velvia, Ektachrome, Provia, Kodachrome | No inversion (positive) |
-| B&W negative | TMAX, HP5, Tri-X, Ilford, Delta | Simple grayscale inversion |
-| Color negative | Portra, Ektar, CineStill, Gold | Orange mask removal + inversion |
-| Already processed | Underdog, Nikon Scan | No processing |
-
-Detection uses:
-1. **Lightroom profile lookup** - "Negative Lab v2.3" indicates already converted
-2. **Folder name patterns** - Film stock names in path (e.g., "Roll 12 Fujifilm Velvia 50")
-
-### Reindex Analog Files
-```bash
-# Clear and rebuild embeddings for Analog folder
-python scripts/reindex_analog.py
-```
+**Tag Categories:**
+- **Subject**: people, animals, vehicles, buildings, nature, water, food, objects
+- **Scene**: indoor, outdoor, urban, rural, nature_scene
+- **Style**: portrait, landscape_style, macro, action, still_life
+- **Mood**: bright, dark, warm, cool
+- **Technical**: bokeh, sharp, black_white, color
 
 ## Project Structure
 
 ```
 photoMotifs/
-├── photo_search.py              # Main search tool with CLIP embeddings
-├── tag_generator.py             # Semantic tag generation and filtered search
-├── README.md
-├── CLAUDE.md                    # AI assistant instructions
-├── .gitignore
+├── run_ui.py                    # Web UI launcher
+├── photo_search.py              # CLI search tool
+├── tag_generator.py             # Semantic tag generation
+├── config.json                  # User settings (gitignored)
 │
-├── src/                         # Source modules
-│   ├── lightroom_integration.py # Lightroom catalog metadata reading
-│   └── smart_preview_mapper.py  # Smart Preview path mapping
+├── ui/                          # Gradio web interface
+│   ├── app.py                   # Main app with theme customization
+│   ├── config.py                # Settings management
+│   ├── state.py                 # Shared app state
+│   └── components/              # UI tabs
+│       ├── search_tab.py
+│       ├── indexing_tab.py
+│       ├── tags_tab.py
+│       └── settings_tab.py
 │
-├── scripts/                     # Utility scripts
-│   └── reindex_analog.py        # Reindex analog film negatives
-│
-├── tests/                       # Test files
-│   ├── benchmark.py             # Performance benchmarks
-│   ├── test_*.py                # Various test scripts
-│   └── fixtures/                # Test images (generated)
+├── src/                         # Core modules
+│   ├── lightroom_integration.py # Catalog metadata reading
+│   └── lightroom_preview_loader.py # Preview extraction
 │
 ├── cache/                       # Cached data (gitignored)
 │   ├── embeddings_cache.pkl     # CLIP embeddings
-│   ├── smart_preview_mapping.pkl # Smart Preview mappings
-│   └── tag_database.json        # Semantic tags database
+│   └── tag_database.json        # Semantic tags
 │
-├── results/                     # Search results HTML reports
-└── old/                         # Deprecated exploration scripts
+├── results/                     # HTML search reports
+└── old/                         # Deprecated scripts
+```
+
+## Customizing the UI
+
+Edit theme colors and fonts in `ui/app.py`:
+
+```python
+# Primary accent color
+PRIMARY_COLOR = "#4CAF50"  # Change to any hex color
+
+# Color theme
+primary_hue=gr.themes.colors.green  # red, orange, yellow, green, cyan, blue, purple, pink
+
+# Font
+font=[gr.themes.GoogleFont("Inter"), "system-ui", "sans-serif"]
 ```
 
 ## Performance
 
-- ~7,900 images indexed in ~29 minutes (RTX 3080)
-- ~10 images/second embedding computation
-- Searches complete in <1 second
+| Metric | Value |
+|--------|-------|
+| Indexing speed | ~45 images/sec |
+| Full library (7,900 images) | ~4 minutes |
+| Search time | <1 second |
+| Lightroom preview coverage | 98.9% |
+
+Tested on NVIDIA RTX 3080 with CUDA.
 
 ## License
 
